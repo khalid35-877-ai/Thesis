@@ -16,6 +16,11 @@ Write-Host "=== Thesis Demo Launcher ===" -ForegroundColor Cyan
 Write-Host "Launching Streamlit app on http://localhost:8501"
 Write-Host ""
 
+$venvPython = Join-Path $root ".venv\Scripts\python.exe"
+if (-not (Test-Path $venvPython)) {
+    throw "Virtual environment Python not found at $venvPython"
+}
+
 # Kill anything already on port 8501
 $occupied = Get-NetTCPConnection -LocalPort 8501 -State Listen -ErrorAction SilentlyContinue
 if ($occupied) {
@@ -26,7 +31,7 @@ if ($occupied) {
 }
 
 # Launch the main Streamlit entrypoint from the repo root.
-$proc = Start-Process -FilePath "python" `
+$proc = Start-Process -FilePath $venvPython `
     -ArgumentList @("-m", "streamlit", "run", "main.py", "--server.port", "8501", "--server.headless", "false") `
     -PassThru
 

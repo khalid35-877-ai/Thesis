@@ -51,7 +51,12 @@ function Invoke-PythonScript {
     }
 }
 
-$pythonExe = (Get-Command python -ErrorAction Stop).Source
+$venvPython = Join-Path $root ".venv\Scripts\python.exe"
+if (-not (Test-Path $venvPython)) {
+    throw "Virtual environment Python not found at $venvPython"
+}
+
+$pythonExe = $venvPython
 
 $hasRunnableAssets = (Test-Path $modelPath) -and (Test-Path $vectorDbRoot)
 $hasComparativeMetrics = (Test-Path $summaryPath) -and (Test-Path $comparisonPath)

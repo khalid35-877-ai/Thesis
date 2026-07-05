@@ -1,8 +1,20 @@
 """Top-level Streamlit entrypoint for the thesis demo.
-This file launches the dashboard implementation in `tcontext/web_app.py`.
+This file is the single launch target for Streamlit and forwards to the dashboard implementation.
 """
 from pathlib import Path
-import runpy
+import sys
 
 APP_ROOT = Path(__file__).resolve().parent
-runpy.run_path(str(APP_ROOT / "tcontext" / "web_app.py"), run_name="__main__")
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
+
+from tcontext.web_app import main as launch_app
+
+
+def app() -> None:
+    """Entry point used by Streamlit when launching main.py."""
+    launch_app()
+
+
+if __name__ == "__main__":
+    app()

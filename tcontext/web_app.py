@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import pickle
 import random
 import time
 import uuid
@@ -26,6 +27,13 @@ except Exception:  # pragma: no cover - optional dependency for cloud deployment
 
 import numpy as np
 import streamlit as st
+
+try:
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+except Exception:  # pragma: no cover - optional dependency for cloud deployments
+    LogisticRegression = None
+    StandardScaler = None
 
 try:
     import pandas as pd
@@ -66,9 +74,11 @@ _os.chdir(str(APP_DIR))
 ARTIFACTS = PROJECT_DIR / "artifacts"
 REPORTS = PROJECT_DIR / "reports"
 MODEL_PATH = PROJECT_DIR / "model" / "cats_vs_dogs_model_quick500.keras"
+FALLBACK_MODEL_PATH = PROJECT_DIR / "model" / "cats_vs_dogs_model_quick500.pkl"
 SUMMARY_PATH = ARTIFACTS / "sampled25_summary.json"
 COMPARISON_CSV = ARTIFACTS / "sampled25_comparison_metrics.csv"
 VECTOR_DB_ROOT = PROJECT_DIR / "vector_db"
+FALLBACK_VECTOR_INDEX_PATH = VECTOR_DB_ROOT / "fallback_vector_index.json"
 COLLECTION_NAME = "clip_image_embeddings"
 CLASS_NAMES = ["cats", "dogs"]
 CLIP_NAME = "openai/clip-vit-base-patch32"
@@ -160,11 +170,107 @@ def _list_sample_images(sample_root_str: str):
     return [str(p) for p in cats], [str(p) for p in dogs]
 
 
+def _image_feature_vector(img_or_path):
+    if Image is None:
+        return None
+    if isinstance(img_or_path, (str, Path)):
+        with Image.open(img_or_path) as img:
+            rgb = np.array(img.convert("RGB"), dtype=np.float32)
+    else:
+        rgb = np.array(img_or_path.convert("RGB"), dtype=np.float32)
+    gray = np.mean(rgb, axis=2)
+    resized = np.array(Image.fromarray(gray.astype(np.uint8)).resize((16, 16)), dtype=np.float32)
+    flattened = resized.reshape(-1) / 255.0
+    color_stats = np.array(
+        [rgb.mean(), rgb.std(), gray.mean(), gray.std(), np.mean(rgb[:, :, 0]), np.mean(rgb[:, :, 1]), np.mean(rgb[:, :, 2])],
+        dtype=np.float32,
+    )
+    return np.concatenate([flattened, color_stats])
+
+
+def _train_fallback_classifier():
+    if Image is None or LogisticRegression is None or StandardScaler is None:
+        return None
+    sample_root = _find_sample_root()
+    cats = sorted((sample_root / "cats").glob("*.jpg"))[:250]
+    dogs = sorted((sample_root / "dogs").glob("*.jpg"))[:250]
+    if not cats or not dogs:
+        return None
+    paths = cats + dogs
+    labels = [0] * len(cats) + [1] * len(dogs)
+    features = np.vstack([_image_feature_vector(p) for p in paths])
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(features)
+    model = LogisticRegression(max_iter=2000, class_weight="balanced")
+    model.fit(scaled, labels)
+    FALLBACK_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with FALLBACK_MODEL_PATH.open("wb") as handle:
+        pickle.dump({"model": model, "scaler": scaler}, handle)
+    return model, scaler
+
+
+def _load_fallback_classifier():
+    if FALLBACK_MODEL_PATH.exists():
+        with FALLBACK_MODEL_PATH.open("rb") as handle:
+            payload = pickle.load(handle)
+        return payload.get("model"), payload.get("scaler")
+    return _train_fallback_classifier()
+
+
+class FallbackVectorCollection:
+    def __init__(self, index_path: Path):
+        self.index_path = Path(index_path)
+        self.index_path.parent.mkdir(parents=True, exist_ok=True)
+        self._entries = self._load_entries()
+
+    def _load_entries(self):
+        if not self.index_path.exists():
+            return []
+        try:
+            payload = json.loads(self.index_path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        return payload if isinstance(payload, list) else []
+
+    def _save_entries(self):
+        self.index_path.write_text(json.dumps(self._entries, indent=2), encoding="utf-8")
+
+    def count(self):
+        return len(self._entries)
+
+    def add(self, ids, embeddings, metadatas):
+        for entry_id, embedding, metadata in zip(ids, embeddings, metadatas):
+            self._entries.append(
+                {"id": entry_id, "embedding": [float(x) for x in embedding], "metadata": metadata}
+            )
+        self._save_entries()
+
+    def query(self, query_embeddings, n_results=5, include=None):
+        if not self._entries:
+            return {"metadatas": [[]], "distances": [[]]}
+        query = np.asarray(query_embeddings[0], dtype=np.float32)
+        scored = []
+        for entry in self._entries:
+            embedding = np.asarray(entry["embedding"], dtype=np.float32)
+            denom = np.linalg.norm(query) * np.linalg.norm(embedding)
+            similarity = float(np.dot(query, embedding) / denom) if denom else 0.0
+            distance = max(0.0, 1.0 - similarity)
+            scored.append((distance, entry))
+        scored.sort(key=lambda item: item[0])
+        selected = scored[: max(1, int(n_results))]
+        metadatas = [entry["metadata"] for _, entry in selected]
+        distances = [distance for distance, _ in selected]
+        return {"metadatas": [metadatas], "distances": [distances]}
+
+
 @st.cache_resource
 def load_classifier():
-    if tf is None or not MODEL_PATH.exists():
+    if tf is not None and MODEL_PATH.exists():
+        return tf.keras.models.load_model(MODEL_PATH)
+    fallback = _load_fallback_classifier()
+    if fallback is None:
         return None
-    return tf.keras.models.load_model(MODEL_PATH)
+    return fallback
 
 
 @st.cache_resource
@@ -180,34 +286,48 @@ def load_clip_stack():
 
 @st.cache_resource
 def load_vector_collection():
-    if chromadb is None or not VECTOR_DB_ROOT.exists():
-        return None
-    db_candidates = [p for p in VECTOR_DB_ROOT.glob("clip_chroma_db*") if p.is_dir()]
-    if not db_candidates:
-        return None
+    if chromadb is not None and VECTOR_DB_ROOT.exists():
+        db_candidates = [p for p in VECTOR_DB_ROOT.glob("clip_chroma_db*") if p.is_dir()]
+        if db_candidates:
+            best_path = None
+            best_count = -1
+            for p in db_candidates:
+                try:
+                    client = chromadb.PersistentClient(path=str(p))
+                    col = client.get_or_create_collection(
+                        name=COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
+                    )
+                    n = col.count()
+                    if n > best_count:
+                        best_count = n
+                        best_path = p
+                except Exception:
+                    continue
 
-    # Pick the DB with the most vectors. Fall back to newest mtime if all are empty.
-    best_path = None
-    best_count = -1
-    for p in db_candidates:
-        try:
-            client = chromadb.PersistentClient(path=str(p))
-            col = client.get_or_create_collection(
-                name=COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
-            )
-            n = col.count()
-            if n > best_count:
-                best_count = n
-                best_path = p
-        except Exception:
-            continue
+            if best_path is None:
+                best_path = sorted(db_candidates, key=lambda p: p.stat().st_mtime, reverse=True)[0]
 
-    if best_path is None:
-        # All failed — fall back to newest by mtime
-        best_path = sorted(db_candidates, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+            client = chromadb.PersistentClient(path=str(best_path))
+            return client.get_or_create_collection(name=COLLECTION_NAME, metadata={"hnsw:space": "cosine"})
 
-    client = chromadb.PersistentClient(path=str(best_path))
-    return client.get_or_create_collection(name=COLLECTION_NAME, metadata={"hnsw:space": "cosine"})
+    if FALLBACK_VECTOR_INDEX_PATH.exists() or Image is not None:
+        collection = FallbackVectorCollection(FALLBACK_VECTOR_INDEX_PATH)
+        if collection.count() == 0:
+            sample_root = _find_sample_root()
+            cats = sorted((sample_root / "cats").glob("*.jpg"))[:120]
+            dogs = sorted((sample_root / "dogs").glob("*.jpg"))[:120]
+            paths = cats + dogs
+            if paths:
+                embeddings = np.vstack([_image_feature_vector(p) for p in paths])
+                ids = [f"fallback_{i:06d}" for i in range(len(paths))]
+                metadatas = [
+                    {"label": 0, "class_name": "cats", "path": str(p)} if p in cats else {"label": 1, "class_name": "dogs", "path": str(p)}
+                    for p in paths
+                ]
+                collection.add(ids=ids, embeddings=embeddings.tolist(), metadatas=metadatas)
+        return collection
+
+    return None
 
 
 def _encode_pil_images(images):
@@ -226,8 +346,6 @@ def _encode_pil_images(images):
 def _build_memory_from_sampled_subset(max_per_class=200):
     if Image is None:
         return {"added": 0, "seconds": 0.0, "error": "Pillow is not available in this deployment."}
-    if chromadb is None:
-        return {"added": 0, "seconds": 0.0, "error": "Vector DB dependencies are not available in this deployment."}
 
     sample_root = _find_sample_root()
     cats = sorted((sample_root / "cats").glob("*.jpg"))[:max_per_class]
@@ -236,29 +354,45 @@ def _build_memory_from_sampled_subset(max_per_class=200):
     if not paths:
         return {"added": 0, "seconds": 0.0}
 
-    bootstrap_db = VECTOR_DB_ROOT / "clip_chroma_db_manual"
-    bootstrap_db.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(path=str(bootstrap_db))
-    try:
-        client.delete_collection(COLLECTION_NAME)
-    except Exception:
-        pass
-    collection = client.get_or_create_collection(name=COLLECTION_NAME, metadata={"hnsw:space": "cosine"})
-
     t0 = time.time()
-    batch_size = 32
-    for start in range(0, len(paths), batch_size):
-        batch = paths[start : start + batch_size]
-        imgs = [Image.open(p).convert("RGB") for p, _, _ in batch]
+    if chromadb is not None:
+        bootstrap_db = VECTOR_DB_ROOT / "clip_chroma_db_manual"
+        bootstrap_db.mkdir(parents=True, exist_ok=True)
+        client = chromadb.PersistentClient(path=str(bootstrap_db))
         try:
-            emb = _encode_pil_images(imgs)
-        except RuntimeError:
-            return {"added": 0, "seconds": time.time() - t0, "error": "CLIP model dependencies are not available in this deployment."}
-        ids = [f"bootstrap_{i+start:06d}" for i in range(len(batch))]
-        metas = [{"label": int(lbl), "class_name": cname, "path": str(p)} for (p, lbl, cname) in batch]
-        collection.add(ids=ids, embeddings=emb.tolist(), metadatas=metas)
-        for img in imgs:
-            img.close()
+            client.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
+        collection = client.get_or_create_collection(name=COLLECTION_NAME, metadata={"hnsw:space": "cosine"})
+
+        batch_size = 32
+        for start in range(0, len(paths), batch_size):
+            batch = paths[start : start + batch_size]
+            imgs = [Image.open(p).convert("RGB") for p, _, _ in batch]
+            try:
+                emb = _encode_pil_images(imgs)
+            except RuntimeError:
+                return {"added": 0, "seconds": time.time() - t0, "error": "CLIP model dependencies are not available in this deployment."}
+            ids = [f"bootstrap_{i+start:06d}" for i in range(len(batch))]
+            metas = [{"label": int(lbl), "class_name": cname, "path": str(p)} for (p, lbl, cname) in batch]
+            collection.add(ids=ids, embeddings=emb.tolist(), metadatas=metas)
+            for img in imgs:
+                img.close()
+        return {"added": len(paths), "seconds": time.time() - t0}
+
+    collection = FallbackVectorCollection(FALLBACK_VECTOR_INDEX_PATH)
+    embeddings = []
+    for path, _, _ in paths:
+        feature = _image_feature_vector(path)
+        if feature is not None:
+            embeddings.append(feature)
+    if not embeddings:
+        return {"added": 0, "seconds": time.time() - t0, "error": "No image features could be generated."}
+    collection.add(
+        ids=[f"fallback_bootstrap_{i:06d}" for i in range(len(paths))],
+        embeddings=embeddings,
+        metadatas=[{"label": int(lbl), "class_name": cname, "path": str(p)} for (p, lbl, cname) in paths],
+    )
     return {"added": len(paths), "seconds": time.time() - t0}
 
 
@@ -275,16 +409,27 @@ def classify_image(img: Image.Image):
     if Image is None:
         return None
     model = load_classifier()
-    if model is None or tf is None:
+    if model is None:
         return None
-    x = img.convert("RGB").resize((224, 224))
-    arr = np.array(x, dtype=np.float32)
-    arr = tf.keras.applications.efficientnet.preprocess_input(arr)
-    arr = np.expand_dims(arr, axis=0)
-    prob_dog = float(model.predict(arr, verbose=0).reshape(-1)[0])
-    pred = "dogs" if prob_dog > 0.5 else "cats"
-    conf = prob_dog if pred == "dogs" else 1.0 - prob_dog
-    return {"prediction": pred, "confidence": conf, "dog_probability": prob_dog}
+    if tf is not None and isinstance(model, tf.keras.Model):
+        x = img.convert("RGB").resize((224, 224))
+        arr = np.array(x, dtype=np.float32)
+        arr = tf.keras.applications.efficientnet.preprocess_input(arr)
+        arr = np.expand_dims(arr, axis=0)
+        prob_dog = float(model.predict(arr, verbose=0).reshape(-1)[0])
+        pred = "dogs" if prob_dog > 0.5 else "cats"
+        conf = prob_dog if pred == "dogs" else 1.0 - prob_dog
+        return {"prediction": pred, "confidence": conf, "dog_probability": prob_dog}
+    if isinstance(model, tuple):
+        classifier, scaler = model
+        features = _image_feature_vector(img)
+        if features is None or classifier is None or scaler is None:
+            return None
+        prob_dog = float(classifier.predict_proba(scaler.transform([features]))[0, 1])
+        pred = "dogs" if prob_dog > 0.5 else "cats"
+        conf = prob_dog if pred == "dogs" else 1.0 - prob_dog
+        return {"prediction": pred, "confidence": conf, "dog_probability": prob_dog}
+    return None
 
 
 def retrieval_predict(img: Image.Image, top_k=5):
@@ -322,8 +467,8 @@ def retrieval_predict(img: Image.Image, top_k=5):
 
 
 def add_memory_image(img: Image.Image, label: str, source_name: str):
-    if Image is None or chromadb is None:
-        raise RuntimeError("Vector DB dependencies are not available in this deployment.")
+    if Image is None:
+        raise RuntimeError("Image processing is not available in this deployment.")
     collection = load_vector_collection()
     if collection is None:
         VECTOR_DB_ROOT.mkdir(parents=True, exist_ok=True)
@@ -473,7 +618,7 @@ def render_metrics():
                 "inference_sec",
             ],
         )
-        st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+        st.dataframe(cmp_df, width="stretch", hide_index=True)
 
         acc_delta = float(summary["classifier"]["accuracy"] - summary["retrieval"]["accuracy"])
         f1_delta = float(summary["classifier"]["f1"] - summary["retrieval"]["f1"])
@@ -522,18 +667,20 @@ def render_project_intent():
 
 def render_experiment_status():
     st.subheader("Experiment Status")
+    has_fallback_model = FALLBACK_MODEL_PATH.exists() or (load_classifier() is not None)
+    has_vector_assets = (VECTOR_DB_ROOT.exists() and (any(VECTOR_DB_ROOT.glob("clip_chroma_db*")) or FALLBACK_VECTOR_INDEX_PATH.exists())) or (load_vector_collection() is not None)
     required = {
         "Summary JSON (optional)": SUMMARY_PATH.exists(),
         "Comparison CSV (optional)": COMPARISON_CSV.exists(),
-        "Classifier model": MODEL_PATH.exists(),
-        "Vector DB": VECTOR_DB_ROOT.exists() and any(VECTOR_DB_ROOT.glob("clip_chroma_db*")),
+        "Classifier model": MODEL_PATH.exists() or has_fallback_model,
+        "Vector DB": has_vector_assets,
         "Comparative EDA report": COMPARATIVE_REPORT.exists(),
     }
     cols = st.columns(len(required))
     for i, (name, ok) in enumerate(required.items()):
         cols[i].metric(name, "Ready" if ok else "Missing")
-    if not (MODEL_PATH.exists() and VECTOR_DB_ROOT.exists() and any(VECTOR_DB_ROOT.glob("clip_chroma_db*"))):
-        st.warning("Core demo assets are missing. Run `run_demo.ps1`.")
+    if not (MODEL_PATH.exists() or has_fallback_model) or not has_vector_assets:
+        st.warning("Core demo assets are missing. The app will build lightweight fallback assets on demand.")
     elif not (SUMMARY_PATH.exists() and COMPARISON_CSV.exists()):
         st.info("Core demo is ready. Optional summary files are missing; app is using fallback sources.")
 
@@ -581,7 +728,7 @@ def render_artifacts():
     if COMPARISON_CSV.exists():
         comp_df = _read_csv(str(COMPARISON_CSV))
         if comp_df is not None:
-            st.dataframe(comp_df, use_container_width=True)
+            st.dataframe(comp_df, width="stretch")
     for img_name in [
         "eda_class_distribution.png",
         "eda_size_distribution.png",
@@ -706,7 +853,7 @@ def render_live_demo():
             st.error("Vector DB not found or empty. Use 'Initialize Retrieval Memory' in Overview.")
         else:
             st.success(f"Prediction: **{ret['prediction']}**")
-            st.dataframe(ret["neighbors"], use_container_width=True, hide_index=True)
+            st.dataframe(ret["neighbors"], width="stretch", hide_index=True)
 
     st.markdown("---")
     st.markdown("#### Incremental Retrieval Memory (No Retraining)")
@@ -898,11 +1045,14 @@ def render_commands():
         "Add to memory": 'python tcontext\\query_demo.py --add-image "img.jpg" --label dogs',
     }
     ref_df = _as_table(list(ref.items()), columns=["Action", "Command"])
-    st.dataframe(ref_df, use_container_width=True, hide_index=True)
+    st.dataframe(ref_df, width="stretch", hide_index=True)
 
 
 def main():
-    st.set_page_config(page_title="Thesis Comparative Demo", layout="wide")
+    try:
+        st.set_page_config(page_title="Thesis Comparative Demo", layout="wide")
+    except Exception:
+        pass
     st.title("Thesis Demo: Deep Learning vs Retrieval Memory")
     st.caption("Clear objective: show similar task performance, but much lower incremental update cost for retrieval-based memory")
     section = st.radio(
