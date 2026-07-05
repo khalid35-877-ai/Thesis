@@ -25,9 +25,9 @@ if ($occupied) {
     Start-Sleep -Seconds 1
 }
 
-# Launch streamlit from repo root; web_app.py does os.chdir internally so paths resolve correctly
-$proc = Start-Process -FilePath "streamlit" `
-    -ArgumentList @("run", "tcontext\web_app.py", "--server.port", "8501", "--server.headless", "false") `
+# Launch the main Streamlit entrypoint from the repo root.
+$proc = Start-Process -FilePath "python" `
+    -ArgumentList @("-m", "streamlit", "run", "main.py", "--server.port", "8501", "--server.headless", "false") `
     -PassThru
 
 # Wait up to 20 s for port to open, then open browser

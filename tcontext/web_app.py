@@ -722,8 +722,8 @@ def render_commands():
             "label": "Launch Streamlit App",
             "description": "Start the dashboard on `http://localhost:8501`. "
                            "Use this if you launched the app from the terminal and want a reminder of the command.",
-            "cmd_display": "streamlit run tcontext\\web_app.py",
-            "cmd": ["streamlit", "run", str(PROJECT_DIR / "web_app.py")],
+            "cmd_display": "python -m streamlit run main.py",
+            "cmd": ["python", "-m", "streamlit", "run", str(PROJECT_DIR.parent / "main.py")],
             "cwd": REPO_ROOT,
             "key": "cmd_launch",
             "warn": "This will open a second Streamlit instance — you are already inside one. "

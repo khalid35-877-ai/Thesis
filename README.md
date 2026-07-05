@@ -16,10 +16,11 @@ This thesis proposes a **non-parametric, retrieval-centric framework**. Instead 
 
 ```
 Thesis/
+├── main.py                        ← Streamlit entrypoint for the app
 ├── launch_app.ps1                  ← One-click launcher (start here)
 ├── run_demo.ps1                    ← Full pipeline + launch (runs experiment first if needed)
 ├── tcontext/
-│   ├── web_app.py                  ← Streamlit dashboard
+│   ├── web_app.py                  ← Streamlit dashboard implementation
 │   ├── quick500_experiment.py      ← Full training + retrieval benchmark pipeline
 │   ├── comparative_eda.py          ← Generates comparative EDA plots and report
 │   ├── query_demo.py               ← CLI tool for incremental memory updates

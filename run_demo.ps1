@@ -51,6 +51,8 @@ function Invoke-PythonScript {
     }
 }
 
+$pythonExe = (Get-Command python -ErrorAction Stop).Source
+
 $hasRunnableAssets = (Test-Path $modelPath) -and (Test-Path $vectorDbRoot)
 $hasComparativeMetrics = (Test-Path $summaryPath) -and (Test-Path $comparisonPath)
 
@@ -76,8 +78,8 @@ if ($listeners) {
     }
 }
 
-$streamlitArgs = @("run", "tcontext/web_app.py", "--server.port", "$Port", "--server.headless", "true")
-$streamlitProc = Start-Process -FilePath "streamlit" -ArgumentList $streamlitArgs -PassThru
+$streamlitArgs = @("-m", "streamlit", "run", "main.py", "--server.port", "$Port", "--server.headless", "true")
+$streamlitProc = Start-Process -FilePath $pythonExe -ArgumentList $streamlitArgs -PassThru
 
 $maxWaitSeconds = 30
 $isReady = $false

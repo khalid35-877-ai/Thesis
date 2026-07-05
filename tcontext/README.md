@@ -11,7 +11,8 @@ Uses 25% class-balanced sampling with explicit anti-overfitting controls.
 
 | File | Purpose |
 |---|---|
-| `web_app.py` | Streamlit dashboard. Entry point for the interactive demo. |
+| `main.py` | Streamlit entrypoint for the interactive demo. |
+| `web_app.py` | Streamlit dashboard implementation loaded by the entrypoint. |
 | `quick500_experiment.py` | Full pipeline: sampling → EDA → training → retrieval benchmark → reports. |
 | `comparative_eda.py` | Generates comparative method metrics plot and EDA markdown report. |
 | `query_demo.py` | CLI tool for querying the vector DB and adding new images to memory. |
