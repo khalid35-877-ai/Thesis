@@ -19,7 +19,11 @@ _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 _os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 _os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-import chromadb
+try:
+    import chromadb
+except Exception:  # pragma: no cover - optional dependency for cloud deployments
+    chromadb = None
+
 import numpy as np
 import streamlit as st
 
@@ -176,7 +180,7 @@ def load_clip_stack():
 
 @st.cache_resource
 def load_vector_collection():
-    if not VECTOR_DB_ROOT.exists():
+    if chromadb is None or not VECTOR_DB_ROOT.exists():
         return None
     db_candidates = [p for p in VECTOR_DB_ROOT.glob("clip_chroma_db*") if p.is_dir()]
     if not db_candidates:
@@ -222,6 +226,8 @@ def _encode_pil_images(images):
 def _build_memory_from_sampled_subset(max_per_class=200):
     if Image is None:
         return {"added": 0, "seconds": 0.0, "error": "Pillow is not available in this deployment."}
+    if chromadb is None:
+        return {"added": 0, "seconds": 0.0, "error": "Vector DB dependencies are not available in this deployment."}
 
     sample_root = _find_sample_root()
     cats = sorted((sample_root / "cats").glob("*.jpg"))[:max_per_class]
@@ -266,6 +272,8 @@ def _load_image_from_url(url: str):
 
 
 def classify_image(img: Image.Image):
+    if Image is None:
+        return None
     model = load_classifier()
     if model is None or tf is None:
         return None
@@ -280,6 +288,8 @@ def classify_image(img: Image.Image):
 
 
 def retrieval_predict(img: Image.Image, top_k=5):
+    if Image is None:
+        return None
     collection = load_vector_collection()
     if collection is None or collection.count() == 0:
         return None
@@ -312,6 +322,8 @@ def retrieval_predict(img: Image.Image, top_k=5):
 
 
 def add_memory_image(img: Image.Image, label: str, source_name: str):
+    if Image is None or chromadb is None:
+        raise RuntimeError("Vector DB dependencies are not available in this deployment.")
     collection = load_vector_collection()
     if collection is None:
         VECTOR_DB_ROOT.mkdir(parents=True, exist_ok=True)
