@@ -20,11 +20,25 @@ import chromadb
 import numpy as np
 import pandas as pd
 import streamlit as st
-import tensorflow as tf
-import torch
-import torch.nn.functional as F
 from PIL import Image
-from transformers import CLIPModel, CLIPProcessor
+
+try:
+    import tensorflow as tf
+except Exception:  # pragma: no cover - optional dependency for cloud deployments
+    tf = None
+
+try:
+    import torch
+    import torch.nn.functional as F
+except Exception:  # pragma: no cover - optional dependency for cloud deployments
+    torch = None
+    F = None
+
+try:
+    from transformers import CLIPModel, CLIPProcessor
+except Exception:  # pragma: no cover - optional dependency for cloud deployments
+    CLIPModel = None
+    CLIPProcessor = None
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -124,13 +138,15 @@ def _list_sample_images(sample_root_str: str):
 
 @st.cache_resource
 def load_classifier():
-    if not MODEL_PATH.exists():
+    if tf is None or not MODEL_PATH.exists():
         return None
     return tf.keras.models.load_model(MODEL_PATH)
 
 
 @st.cache_resource
 def load_clip_stack():
+    if torch is None or F is None or CLIPModel is None or CLIPProcessor is None:
+        return None
     device = "cuda" if torch.cuda.is_available() else "cpu"
     processor = CLIPProcessor.from_pretrained(CLIP_NAME)
     model = CLIPModel.from_pretrained(CLIP_NAME).to(device)
@@ -171,7 +187,10 @@ def load_vector_collection():
 
 
 def _encode_pil_images(images):
-    clip_model, processor, device = load_clip_stack()
+    stack = load_clip_stack()
+    if stack is None:
+        raise RuntimeError("CLIP model dependencies are not available in this deployment.")
+    clip_model, processor, device = stack
     inputs = processor(images=images, return_tensors="pt", padding=True).to(device)
     with torch.inference_mode():
         emb_out = clip_model.get_image_features(pixel_values=inputs["pixel_values"])
@@ -202,7 +221,10 @@ def _build_memory_from_sampled_subset(max_per_class=200):
     for start in range(0, len(paths), batch_size):
         batch = paths[start : start + batch_size]
         imgs = [Image.open(p).convert("RGB") for p, _, _ in batch]
-        emb = _encode_pil_images(imgs)
+        try:
+            emb = _encode_pil_images(imgs)
+        except RuntimeError:
+            return {"added": 0, "seconds": time.time() - t0, "error": "CLIP model dependencies are not available in this deployment."}
         ids = [f"bootstrap_{i+start:06d}" for i in range(len(batch))]
         metas = [{"label": int(lbl), "class_name": cname, "path": str(p)} for (p, lbl, cname) in batch]
         collection.add(ids=ids, embeddings=emb.tolist(), metadatas=metas)
@@ -220,7 +242,7 @@ def _load_image_from_url(url: str):
 
 def classify_image(img: Image.Image):
     model = load_classifier()
-    if model is None:
+    if model is None or tf is None:
         return None
     x = img.convert("RGB").resize((224, 224))
     arr = np.array(x, dtype=np.float32)
@@ -236,7 +258,10 @@ def retrieval_predict(img: Image.Image, top_k=5):
     collection = load_vector_collection()
     if collection is None or collection.count() == 0:
         return None
-    clip_model, processor, device = load_clip_stack()
+    stack = load_clip_stack()
+    if stack is None:
+        return None
+    clip_model, processor, device = stack
     inputs = processor(images=[img.convert("RGB")], return_tensors="pt", padding=True).to(device)
     with torch.inference_mode():
         emb_out = clip_model.get_image_features(pixel_values=inputs["pixel_values"])
@@ -266,7 +291,10 @@ def add_memory_image(img: Image.Image, label: str, source_name: str):
     if collection is None:
         VECTOR_DB_ROOT.mkdir(parents=True, exist_ok=True)
         collection = load_vector_collection.clear() or load_vector_collection()
-    clip_model, processor, device = load_clip_stack()
+    stack = load_clip_stack()
+    if stack is None:
+        raise RuntimeError("CLIP model dependencies are not available in this deployment.")
+    clip_model, processor, device = stack
     inputs = processor(images=[img.convert("RGB")], return_tensors="pt", padding=True).to(device)
     t0 = time.time()
     with torch.inference_mode():
