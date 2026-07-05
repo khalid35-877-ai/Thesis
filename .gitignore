@@ -1,0 +1,27 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local experiment cache and heavy outputs
+tcontext/data/raw/
+tcontext/data/clean/
+tcontext/data/sampled_25_percent/
+tcontext/model/
+tcontext/vector_db/
+
+# Generated plots and CSV/JSON artifacts
+tcontext/artifacts/
+
+# Local run logs
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db

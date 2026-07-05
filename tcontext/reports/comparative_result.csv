@@ -1,0 +1,3 @@
+﻿method,accuracy,precision,recall,f1,train_or_build_sec,inference_sec
+Deep Learning (EfficientNet Classifier),0.98,1,0.96,0.9795918367346939,703.9532227516174,25.451001405715942
+Retrieval (CLIP + Vector DB),0.988,1,0.976,0.9878542510121457,133.23582935333252,29.7111496925354
