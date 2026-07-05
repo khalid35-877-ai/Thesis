@@ -1,7 +1,5 @@
 chromadb==1.5.7
 streamlit==1.56.0
-pillow==11.2.1
-pandas==2.2.3
 numpy==1.26.4
 matplotlib==3.9.2
 seaborn==0.13.2

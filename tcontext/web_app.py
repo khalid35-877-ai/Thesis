@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import csv
 import json
 import random
 import time
@@ -18,9 +21,17 @@ _os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import chromadb
 import numpy as np
-import pandas as pd
 import streamlit as st
-from PIL import Image
+
+try:
+    import pandas as pd
+except Exception:  # pragma: no cover - optional dependency for cloud deployments
+    pd = None
+
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - optional dependency for cloud deployments
+    Image = None
 
 try:
     import tensorflow as tf
@@ -120,12 +131,21 @@ def _read_text(path_str: str):
     return p.read_text(encoding="utf-8", errors="ignore")
 
 
+def _as_table(records, columns=None):
+    if pd is not None:
+        return pd.DataFrame(records, columns=columns)
+    return list(records)
+
+
 @st.cache_data(show_spinner=False)
 def _read_csv(path_str: str):
     p = Path(path_str)
     if not p.exists():
         return None
-    return pd.read_csv(p)
+    if pd is not None:
+        return pd.read_csv(p)
+    with p.open("r", encoding="utf-8-sig", newline="") as handle:
+        return list(csv.DictReader(handle))
 
 
 @st.cache_data(show_spinner=False)
@@ -200,6 +220,9 @@ def _encode_pil_images(images):
 
 
 def _build_memory_from_sampled_subset(max_per_class=200):
+    if Image is None:
+        return {"added": 0, "seconds": 0.0, "error": "Pillow is not available in this deployment."}
+
     sample_root = _find_sample_root()
     cats = sorted((sample_root / "cats").glob("*.jpg"))[:max_per_class]
     dogs = sorted((sample_root / "dogs").glob("*.jpg"))[:max_per_class]
@@ -234,6 +257,8 @@ def _build_memory_from_sampled_subset(max_per_class=200):
 
 
 def _load_image_from_url(url: str):
+    if Image is None:
+        raise RuntimeError("Pillow is not available in this deployment.")
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urlopen(req, timeout=12) as resp:
         payload = resp.read()
@@ -405,7 +430,7 @@ def render_metrics():
 
         # Single comparative table for thesis-ready side-by-side reading.
         st.markdown("#### Unified Comparative View")
-        cmp_df = pd.DataFrame(
+        cmp_df = _as_table(
             [
                 {
                     "method": "Deep Learning (EfficientNet Classifier)",
@@ -425,7 +450,16 @@ def render_metrics():
                     "train_or_build_sec": summary["retrieval"].get("db_build_seconds"),
                     "inference_sec": summary["retrieval"].get("inference_seconds"),
                 },
-            ]
+            ],
+            columns=[
+                "method",
+                "accuracy",
+                "precision",
+                "recall",
+                "f1",
+                "train_or_build_sec",
+                "inference_sec",
+            ],
         )
         st.dataframe(cmp_df, use_container_width=True, hide_index=True)
 
@@ -582,6 +616,9 @@ def render_comparative_eda():
 
 def render_live_demo():
     st.subheader("Live Comparative Inference")
+    if Image is None:
+        st.warning("Image processing is unavailable because Pillow is not installed in this deployment.")
+        return
     st.markdown("Choose an image source:")
     source_mode = st.radio(
         "Image source",
@@ -848,7 +885,7 @@ def render_commands():
         "Query vector DB": 'python tcontext\\query_demo.py --query-image "img.jpg" --top-k 5',
         "Add to memory": 'python tcontext\\query_demo.py --add-image "img.jpg" --label dogs',
     }
-    ref_df = pd.DataFrame(list(ref.items()), columns=["Action", "Command"])
+    ref_df = _as_table(list(ref.items()), columns=["Action", "Command"])
     st.dataframe(ref_df, use_container_width=True, hide_index=True)
 
 
